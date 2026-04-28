@@ -1,0 +1,103 @@
+name: Build and Release Figra
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, for example v0.2.0"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build DMG and publish release
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag_name="${{ inputs.tag_name }}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag_name="${GITHUB_REF_NAME}"
+          else
+            tag_name=""
+          fi
+
+          if [[ -n "$tag_name" && ! "$tag_name" =~ ^v[0-9]+(\.[0-9]+)*([.-][A-Za-z0-9]+)*$ ]]; then
+            echo "Invalid tag name: $tag_name" >&2
+            exit 1
+          fi
+
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          if [[ -n "$tag_name" ]]; then
+            echo "asset_name=Figra-${tag_name}.dmg" >> "$GITHUB_OUTPUT"
+          else
+            echo "asset_name=Figra-${GITHUB_SHA::7}.dmg" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build DMG
+        working-directory: PDFImageExtractorApp
+        run: ./build_dmg.sh
+
+      - name: Prepare release asset
+        run: |
+          set -euo pipefail
+          cp "PDFImageExtractorApp/Figra.dmg" "${{ steps.release.outputs.asset_name }}"
+          shasum -a 256 "${{ steps.release.outputs.asset_name }}" > "${{ steps.release.outputs.asset_name }}.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.release.outputs.asset_name }}
+          path: |
+            ${{ steps.release.outputs.asset_name }}
+            ${{ steps.release.outputs.asset_name }}.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: steps.release.outputs.tag_name != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+          ASSET_NAME: ${{ steps.release.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+          notes_file="$(mktemp)"
+          {
+            echo "Automated Figra release for ${TAG_NAME}."
+            echo
+            echo "Assets:"
+            echo "- ${ASSET_NAME}"
+            echo "- ${ASSET_NAME}.sha256"
+          } > "$notes_file"
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "$ASSET_NAME" "$ASSET_NAME.sha256" --clobber
+            gh release edit "$TAG_NAME" \
+              --title "Figra ${TAG_NAME}" \
+              --notes-file "$notes_file" \
+              --latest
+          else
+            gh release create "$TAG_NAME" "$ASSET_NAME" "$ASSET_NAME.sha256" \
+              --title "Figra ${TAG_NAME}" \
+              --notes-file "$notes_file" \
+              --latest
+          fi
