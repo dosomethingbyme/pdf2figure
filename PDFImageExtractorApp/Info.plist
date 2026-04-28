@@ -5,7 +5,7 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleExecutable</key>
-  <string>PDFImageExtractor</string>
+  <string>Figra</string>
   <key>CFBundleIdentifier</key>
   <string>local.codex.Figra</string>
   <key>CFBundleInfoDictionaryVersion</key>

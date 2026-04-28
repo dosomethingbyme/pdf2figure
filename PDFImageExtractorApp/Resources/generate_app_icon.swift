@@ -1,13 +1,45 @@
 import AppKit
+import Foundation
 
-let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-let iconset = root.appendingPathComponent("AppIcon.iconset", isDirectory: true)
+let resources = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+let projectRoot = resources.deletingLastPathComponent().deletingLastPathComponent()
+let sourceURL = projectRoot.appendingPathComponent("logo.png")
+let iconset = resources.appendingPathComponent("AppIcon.iconset", isDirectory: true)
+
+guard let sourceImage = NSImage(contentsOf: sourceURL) else {
+    fputs("Cannot load logo source: \(sourceURL.path)\n", stderr)
+    exit(1)
+}
+
 try? FileManager.default.removeItem(at: iconset)
 try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
+let bundledLogo = resources.appendingPathComponent("logo.png")
+try? FileManager.default.removeItem(at: bundledLogo)
 
-func savePNG(_ image: NSImage, to url: URL) throws {
+func savePNG(_ image: NSImage, size: CGFloat, to url: URL) throws {
+    let output = NSImage(size: NSSize(width: size, height: size))
+    output.lockFocus()
+    NSGraphicsContext.current?.imageInterpolation = .high
+    NSColor.clear.setFill()
+    let canvas = NSRect(x: 0, y: 0, width: size, height: size)
+    canvas.fill()
+
+    let iconRect = canvas.insetBy(dx: size * 0.035, dy: size * 0.035)
+    let radius = size * 0.2237
+    let roundedPath = NSBezierPath(roundedRect: iconRect, xRadius: radius, yRadius: radius)
+
+    NSGraphicsContext.saveGraphicsState()
+    roundedPath.addClip()
+    image.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+    NSGraphicsContext.restoreGraphicsState()
+
+    NSColor.black.withAlphaComponent(0.12).setStroke()
+    roundedPath.lineWidth = max(1, size * 0.006)
+    roundedPath.stroke()
+    output.unlockFocus()
+
     guard
-        let tiff = image.tiffRepresentation,
+        let tiff = output.tiffRepresentation,
         let bitmap = NSBitmapImageRep(data: tiff),
         let png = bitmap.representation(using: .png, properties: [:])
     else {
@@ -16,74 +48,7 @@ func savePNG(_ image: NSImage, to url: URL) throws {
     try png.write(to: url)
 }
 
-func drawIcon(size: CGFloat) -> NSImage {
-    let image = NSImage(size: NSSize(width: size, height: size))
-    image.lockFocus()
-
-    let bounds = NSRect(x: 0, y: 0, width: size, height: size)
-    NSColor.clear.setFill()
-    bounds.fill()
-
-    let scale = size / 1024.0
-    let outer = bounds.insetBy(dx: 84 * scale, dy: 84 * scale)
-    let outerPath = NSBezierPath(roundedRect: outer, xRadius: 220 * scale, yRadius: 220 * scale)
-    let gradient = NSGradient(colors: [
-        NSColor(calibratedRed: 0.16, green: 0.50, blue: 0.96, alpha: 1),
-        NSColor(calibratedRed: 0.08, green: 0.66, blue: 0.72, alpha: 1)
-    ])!
-    gradient.draw(in: outerPath, angle: 42)
-
-    NSColor.white.withAlphaComponent(0.22).setStroke()
-    outerPath.lineWidth = 8 * scale
-    outerPath.stroke()
-
-    let sheet = NSRect(x: 286 * scale, y: 258 * scale, width: 452 * scale, height: 516 * scale)
-    let sheetPath = NSBezierPath(roundedRect: sheet, xRadius: 58 * scale, yRadius: 58 * scale)
-    NSColor.white.withAlphaComponent(0.96).setFill()
-    sheetPath.fill()
-
-    NSColor(calibratedRed: 0.10, green: 0.36, blue: 0.78, alpha: 1).withAlphaComponent(0.18).setFill()
-    NSBezierPath(roundedRect: NSRect(x: 336 * scale, y: 642 * scale, width: 250 * scale, height: 34 * scale), xRadius: 17 * scale, yRadius: 17 * scale).fill()
-    NSBezierPath(roundedRect: NSRect(x: 336 * scale, y: 584 * scale, width: 310 * scale, height: 34 * scale), xRadius: 17 * scale, yRadius: 17 * scale).fill()
-
-    let figureRect = NSRect(x: 336 * scale, y: 346 * scale, width: 352 * scale, height: 184 * scale)
-    let figurePath = NSBezierPath(roundedRect: figureRect, xRadius: 34 * scale, yRadius: 34 * scale)
-    NSColor(calibratedRed: 0.07, green: 0.57, blue: 0.62, alpha: 1).withAlphaComponent(0.18).setFill()
-    figurePath.fill()
-
-    NSColor(calibratedRed: 0.10, green: 0.36, blue: 0.78, alpha: 1).withAlphaComponent(0.80).setStroke()
-    figurePath.lineWidth = 10 * scale
-    figurePath.stroke()
-
-    let mountain = NSBezierPath()
-    mountain.move(to: NSPoint(x: 368 * scale, y: 386 * scale))
-    mountain.line(to: NSPoint(x: 462 * scale, y: 480 * scale))
-    mountain.line(to: NSPoint(x: 536 * scale, y: 418 * scale))
-    mountain.line(to: NSPoint(x: 598 * scale, y: 474 * scale))
-    mountain.line(to: NSPoint(x: 660 * scale, y: 386 * scale))
-    mountain.close()
-    NSColor(calibratedRed: 0.10, green: 0.36, blue: 0.78, alpha: 1).setFill()
-    mountain.fill()
-
-    NSColor(calibratedRed: 0.08, green: 0.66, blue: 0.72, alpha: 1).setFill()
-    NSBezierPath(ovalIn: NSRect(x: 382 * scale, y: 456 * scale, width: 44 * scale, height: 44 * scale)).fill()
-
-    let mark = NSBezierPath()
-    mark.lineWidth = 28 * scale
-    mark.lineCapStyle = .round
-    mark.lineJoinStyle = .round
-    mark.move(to: NSPoint(x: 298 * scale, y: 786 * scale))
-    mark.line(to: NSPoint(x: 228 * scale, y: 786 * scale))
-    mark.line(to: NSPoint(x: 228 * scale, y: 716 * scale))
-    mark.move(to: NSPoint(x: 726 * scale, y: 238 * scale))
-    mark.line(to: NSPoint(x: 796 * scale, y: 238 * scale))
-    mark.line(to: NSPoint(x: 796 * scale, y: 308 * scale))
-    NSColor.white.setStroke()
-    mark.stroke()
-
-    image.unlockFocus()
-    return image
-}
+try savePNG(sourceImage, size: 1024, to: bundledLogo)
 
 let outputs: [(String, CGFloat)] = [
     ("icon_16x16.png", 16),
@@ -99,5 +64,46 @@ let outputs: [(String, CGFloat)] = [
 ]
 
 for (name, size) in outputs {
-    try savePNG(drawIcon(size: size), to: iconset.appendingPathComponent(name))
+    try savePNG(sourceImage, size: size, to: iconset.appendingPathComponent(name))
 }
+
+func appendUInt16(_ value: UInt16, to data: inout Data) {
+    var littleEndian = value.littleEndian
+    withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+}
+
+func appendUInt32(_ value: UInt32, to data: inout Data) {
+    var littleEndian = value.littleEndian
+    withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+}
+
+let icoSources: [(UInt8, UInt8, URL)] = [
+    (16, 16, iconset.appendingPathComponent("icon_16x16.png")),
+    (32, 32, iconset.appendingPathComponent("icon_32x32.png")),
+    (0, 0, iconset.appendingPathComponent("icon_256x256.png"))
+]
+let icoImages = try icoSources.map { width, height, url in
+    (width: width, height: height, data: try Data(contentsOf: url))
+}
+
+var ico = Data()
+appendUInt16(0, to: &ico)
+appendUInt16(1, to: &ico)
+appendUInt16(UInt16(icoImages.count), to: &ico)
+
+var imageOffset = 6 + icoImages.count * 16
+for image in icoImages {
+    ico.append(image.width)
+    ico.append(image.height)
+    ico.append(0)
+    ico.append(0)
+    appendUInt16(1, to: &ico)
+    appendUInt16(32, to: &ico)
+    appendUInt32(UInt32(image.data.count), to: &ico)
+    appendUInt32(UInt32(imageOffset), to: &ico)
+    imageOffset += image.data.count
+}
+for image in icoImages {
+    ico.append(image.data)
+}
+try ico.write(to: resources.appendingPathComponent("AppIcon.ico"))

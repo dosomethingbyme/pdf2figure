@@ -12,11 +12,18 @@ RESOURCES="$CONTENTS/Resources"
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS" "$RESOURCES" "$BUILD_DIR"
 
-swiftc "$ROOT_DIR/Sources/PDFImageExtractor.swift" \
+if [[ -f "$ROOT_DIR/../logo.png" && -f "$ROOT_DIR/Resources/generate_app_icon.swift" ]]; then
+  (cd "$ROOT_DIR/Resources" && swift generate_app_icon.swift && iconutil -c icns AppIcon.iconset -o AppIcon.icns)
+fi
+
+swiftc "$ROOT_DIR/Sources"/*.swift \
   -target arm64-apple-macosx13.0 \
+  -parse-as-library \
+  -framework SwiftUI \
   -framework AppKit \
+  -framework PDFKit \
   -framework UniformTypeIdentifiers \
-  -o "$MACOS/PDFImageExtractor"
+  -o "$MACOS/Figra"
 
 cp "$ROOT_DIR/Info.plist" "$CONTENTS/Info.plist"
 if [[ -f "$ROOT_DIR/Resources/pdffigures2.jar" ]]; then
@@ -28,7 +35,13 @@ fi
 if [[ -f "$ROOT_DIR/Resources/AppIcon.icns" ]]; then
   cp "$ROOT_DIR/Resources/AppIcon.icns" "$RESOURCES/AppIcon.icns"
 fi
-chmod +x "$MACOS/PDFImageExtractor"
+if [[ -f "$ROOT_DIR/Resources/AppIcon.ico" ]]; then
+  cp "$ROOT_DIR/Resources/AppIcon.ico" "$RESOURCES/AppIcon.ico"
+fi
+if [[ -f "$ROOT_DIR/Resources/logo.png" ]]; then
+  cp "$ROOT_DIR/Resources/logo.png" "$RESOURCES/logo.png"
+fi
+chmod +x "$MACOS/Figra"
 if [[ -f "$RESOURCES/jre/bin/java" ]]; then
   chmod +x "$RESOURCES/jre/bin/java"
 fi
