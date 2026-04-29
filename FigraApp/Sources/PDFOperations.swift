@@ -9,11 +9,18 @@ struct AppError: LocalizedError {
 }
 
 func makePageItems(document: PDFDocument) -> [PageItem] {
-    (0..<document.pageCount).compactMap { index in
-        guard let page = document.page(at: index) else { return nil }
-        let thumbnail = page.thumbnail(of: NSSize(width: 220, height: 300), for: .mediaBox)
-        return PageItem(index: index, thumbnail: thumbnail)
+    makePagePlaceholders(pageCount: document.pageCount)
+}
+
+func makePagePlaceholders(pageCount: Int) -> [PageItem] {
+    (0..<pageCount).map { index in
+        PageItem(index: index, thumbnail: nil)
     }
+}
+
+func makePageThumbnail(document: PDFDocument, pageIndex: Int, size: NSSize = NSSize(width: 220, height: 300)) -> PageItem? {
+    guard let page = document.page(at: pageIndex) else { return nil }
+    return PageItem(index: pageIndex, thumbnail: page.thumbnail(of: size, for: .mediaBox))
 }
 
 func parsePageRanges(_ value: String, pageCount: Int) throws -> [Int] {

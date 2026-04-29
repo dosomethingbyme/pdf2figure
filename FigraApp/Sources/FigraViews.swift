@@ -52,6 +52,22 @@ struct FigraAppView: View {
             }
             .frame(minWidth: 900, minHeight: 680)
             .background(Color(nsColor: .windowBackgroundColor))
+            .overlay(alignment: .topTrailing) {
+                if model.isWorking || model.isExtractingFigures {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("处理中")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial)
+                    .clipShape(Capsule())
+                    .padding(18)
+                }
+            }
         }
     }
 }
@@ -173,6 +189,7 @@ struct PageSelectionControls: View {
                         .textFieldStyle(.roundedBorder)
                     Button("每 N 页保存为 PDF") { model.splitExportEveryNPages() }
                 }
+                .disabled(model.isWorking)
             } else {
                 HStack {
                     Button("保存为图片") { model.exportSelectedPagesAsImages() }
@@ -180,6 +197,7 @@ struct PageSelectionControls: View {
                     Button("每页保存为 PDF") { model.exportSelectedPagesAsIndividualPDFs() }
                     Button("按连续分组保存 PDF") { model.exportSelectedPagesAsGroupedPDFs() }
                 }
+                .disabled(model.isWorking)
             }
         }
         .padding(16)
@@ -211,12 +229,7 @@ struct PageThumbnailPanel: View {
                                 onSelect(page.index)
                             } label: {
                                 VStack(spacing: 8) {
-                                    Image(nsImage: page.thumbnail)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(height: 128)
-                                        .background(Color(nsColor: .textBackgroundColor))
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                    PageThumbnailImage(image: page.thumbnail, height: 128)
                                     Text("第 \(page.index + 1) 页")
                                         .font(.caption)
                                         .foregroundStyle(.primary)
@@ -480,6 +493,7 @@ struct MergePDFView: View {
                 Spacer()
                 Button("导出合并 PDF") { model.exportMergedPDF() }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(model.isWorking)
             }
         }
         .padding(28)
@@ -558,7 +572,7 @@ struct PageOrganizeView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("导出整理后的 PDF") { model.exportOrganizedPDF() }
-                    .disabled(model.organizeOrder.isEmpty)
+                    .disabled(model.organizeOrder.isEmpty || model.isWorking)
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -575,14 +589,8 @@ struct OrganizePageCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ZStack(alignment: .topTrailing) {
-                Image(nsImage: item.thumbnail)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 190)
+                PageThumbnailImage(image: item.thumbnail, height: 190)
                     .padding(10)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                 Button(action: onRemove) {
                     Image(systemName: "xmark.circle.fill")
@@ -616,6 +624,29 @@ struct OrganizePageCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: Color.black.opacity(isDragging ? 0.12 : 0.04), radius: isDragging ? 12 : 4, x: 0, y: isDragging ? 8 : 2)
         .opacity(isDragging ? 0.72 : 1)
+    }
+}
+
+struct PageThumbnailImage: View {
+    let image: NSImage?
+    let height: CGFloat
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -672,7 +703,7 @@ struct CompressPDFView: View {
 
             HStack {
                 Button("导出优化副本") { model.exportCompressedPDF() }
-                    .disabled(model.compressPDFURL == nil)
+                    .disabled(model.compressPDFURL == nil || model.isWorking)
                 if let outputURL = model.compressOutputURL {
                     Button("在 Finder 中显示") {
                         NSWorkspace.shared.activateFileViewerSelecting([outputURL])
@@ -714,9 +745,9 @@ struct SecurityPDFView: View {
                     .textFieldStyle(.roundedBorder)
                 HStack {
                     Button("导出加密副本") { model.exportEncryptedPDF() }
-                        .disabled(model.securityPDFURL == nil)
+                        .disabled(model.securityPDFURL == nil || model.isWorking)
                     Button("导出无密码副本") { model.exportUnlockedPDF() }
-                        .disabled(model.securityPDFURL == nil)
+                        .disabled(model.securityPDFURL == nil || model.isWorking)
                     if let outputURL = model.securityOutputURL {
                         Button("在 Finder 中显示") {
                             NSWorkspace.shared.activateFileViewerSelecting([outputURL])
@@ -854,7 +885,7 @@ struct PrivacyView: View {
 
             HStack {
                 Button("导出清理副本") { model.exportPrivacyCleanPDF() }
-                    .disabled(model.privacyPDFURL == nil)
+                    .disabled(model.privacyPDFURL == nil || model.isWorking)
                 if let outputURL = model.privacyOutputURL {
                     Button("在 Finder 中显示") {
                         NSWorkspace.shared.activateFileViewerSelecting([outputURL])

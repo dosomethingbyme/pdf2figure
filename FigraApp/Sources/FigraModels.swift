@@ -57,9 +57,9 @@ enum DPI: Int, CaseIterable, Identifiable {
 }
 
 struct PageItem: Identifiable {
-    let id = UUID()
+    var id: Int { index }
     let index: Int
-    let thumbnail: NSImage
+    var thumbnail: NSImage?
 }
 
 struct FigureResult: Identifiable {
@@ -93,4 +93,15 @@ struct RecentTask: Identifiable {
     let detail: String
     let outputURL: URL?
     let date: Date
+}
+
+extension Array where Element == PageItem {
+    mutating func applyThumbnails(_ thumbnails: [PageItem]) {
+        guard !thumbnails.isEmpty else { return }
+        let indexesByPage = Dictionary(uniqueKeysWithValues: enumerated().map { ($0.element.index, $0.offset) })
+        for thumbnail in thumbnails {
+            guard let index = indexesByPage[thumbnail.index] else { continue }
+            self[index].thumbnail = thumbnail.thumbnail
+        }
+    }
 }
