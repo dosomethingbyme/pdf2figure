@@ -23,14 +23,19 @@ extension AppModel {
         }
 
         let baseName = safeName(pdfURL.deletingPathExtension().lastPathComponent)
-        let outputURL = uniqueOutputDirectory(for: pdfURL, suffix: "_pdffigures2")
-        let figuresURL = outputURL.appendingPathComponent("figures")
-        let dataURL = outputURL.appendingPathComponent("figure_data")
+        let outputURL = figureOutputDirectory(for: pdfURL, folderPrefix: "images_")
+        let workURL = outputURL.appendingPathComponent(".figra-pdffigures-\(UUID().uuidString)", isDirectory: true)
+        let figuresURL = workURL.appendingPathComponent("figures", isDirectory: true)
+        let dataURL = workURL.appendingPathComponent("data", isDirectory: true)
         do {
+            try FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: figuresURL, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: dataURL, withIntermediateDirectories: true)
         } catch {
             return FigureExtractionOutput(status: "创建输出目录失败。", log: error.localizedDescription, outputURL: nil, images: [])
+        }
+        defer {
+            try? FileManager.default.removeItem(at: workURL)
         }
 
         let process = Process()
@@ -77,8 +82,12 @@ extension AppModel {
             return FigureExtractionOutput(status: "提取失败，请查看日志。", log: log, outputURL: outputURL, images: [])
         }
 
-        _ = removePDFPrefixFromPNGs(in: figuresURL, prefixes: [baseName, pdfURL.deletingPathExtension().lastPathComponent])
-        let images = pngFiles(in: figuresURL)
+        let images = moveExtractedPNGs(
+            from: figuresURL,
+            to: outputURL,
+            prefixesToStrip: [baseName, pdfURL.deletingPathExtension().lastPathComponent],
+            outputPrefix: "figurex_"
+        )
         let status = images.isEmpty ? "未识别到 Figure/Table。" : "识别到 \(images.count) 个 Figure/Table。"
         return FigureExtractionOutput(status: status, log: log.isEmpty ? "pdffigures2 未返回详细日志。" : log, outputURL: outputURL, images: images)
     }
@@ -90,13 +99,9 @@ extension AppModel {
     }
 }
 
-private func uniqueOutputDirectory(for pdfURL: URL, suffix: String) -> URL {
+private func figureOutputDirectory(for pdfURL: URL, folderPrefix: String) -> URL {
     let baseName = safeName(pdfURL.deletingPathExtension().lastPathComponent)
-    let base = pdfURL.deletingLastPathComponent().appendingPathComponent("\(baseName)\(suffix)")
-    guard FileManager.default.fileExists(atPath: base.path) else { return base }
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyyMMdd_HHmmss"
-    return pdfURL.deletingLastPathComponent().appendingPathComponent("\(baseName)\(suffix)_\(formatter.string(from: Date()))")
+    return pdfURL.deletingLastPathComponent().appendingPathComponent("\(folderPrefix)\(baseName)", isDirectory: true)
 }
 
 private func pngFiles(in directory: URL) -> [URL] {
@@ -106,22 +111,30 @@ private func pngFiles(in directory: URL) -> [URL] {
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
 }
 
-private func removePDFPrefixFromPNGs(in directory: URL, prefixes: [String]) -> Int {
-    var count = 0
-    let normalized = Set(prefixes.flatMap { prefix in
+private func moveExtractedPNGs(from sourceDirectory: URL, to destinationDirectory: URL, prefixesToStrip: [String], outputPrefix: String) -> [URL] {
+    let normalized = Set(prefixesToStrip.flatMap { prefix in
         let safe = safeName(prefix)
         return ["\(prefix)-", "\(prefix)_", "\(safe)-", "\(safe)_"]
     })
-    for url in pngFiles(in: directory) {
-        guard let prefix = normalized.first(where: { url.lastPathComponent.hasPrefix($0) }) else { continue }
-        let stripped = String(url.lastPathComponent.dropFirst(prefix.count))
-        guard !stripped.isEmpty else { continue }
+    var moved: [URL] = []
+    for url in pngFiles(in: sourceDirectory) {
+        var name = url.lastPathComponent
+        if let prefix = normalized.first(where: { name.hasPrefix($0) }) {
+            let stripped = String(name.dropFirst(prefix.count))
+            if !stripped.isEmpty {
+                name = stripped
+            }
+        }
+        if !name.hasPrefix(outputPrefix) {
+            name = "\(outputPrefix)\(name)"
+        }
+        let destinationURL = uniqueFileURL(in: destinationDirectory, fileName: name)
         do {
-            try FileManager.default.moveItem(at: url, to: uniqueFileURL(in: directory, fileName: stripped))
-            count += 1
+            try FileManager.default.moveItem(at: url, to: destinationURL)
+            moved.append(destinationURL)
         } catch {
             continue
         }
     }
-    return count
+    return moved.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
 }
