@@ -288,27 +288,41 @@ func loadPDFURLs(from providers: [NSItemProvider], completion: @escaping ([URL])
             }
         } else if provider.hasItemConformingToTypeIdentifier(UTType.pdf.identifier) {
             group.enter()
-            provider.loadFileRepresentation(forTypeIdentifier: UTType.pdf.identifier) { url, _ in
+            provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.pdf.identifier) { url, inPlace, _ in
                 defer { group.leave() }
                 guard let url else { return }
-                let temporaryURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("FigraDroppedPDFs", isDirectory: true)
-                    .appendingPathComponent(UUID().uuidString)
-                    .appendingPathExtension("pdf")
-                do {
-                    try FileManager.default.createDirectory(at: temporaryURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if FileManager.default.fileExists(atPath: temporaryURL.path) {
-                        try FileManager.default.removeItem(at: temporaryURL)
-                    }
-                    try FileManager.default.copyItem(at: url, to: temporaryURL)
+
+                if inPlace {
+                    append(url)
+                    return
+                }
+
+                if let temporaryURL = copyDroppedPDFToTemporaryURL(url) {
                     append(temporaryURL)
-                } catch {
+                } else {
                     append(url)
                 }
             }
         }
     }
     group.notify(queue: .main) { completion(urls) }
+}
+
+private func copyDroppedPDFToTemporaryURL(_ url: URL) -> URL? {
+    let temporaryURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FigraDroppedPDFs", isDirectory: true)
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension("pdf")
+    do {
+        try FileManager.default.createDirectory(at: temporaryURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: temporaryURL.path) {
+            try FileManager.default.removeItem(at: temporaryURL)
+        }
+        try FileManager.default.copyItem(at: url, to: temporaryURL)
+        return temporaryURL
+    } catch {
+        return nil
+    }
 }
 
 private func urlFromDroppedItem(_ item: Any?) -> URL? {
