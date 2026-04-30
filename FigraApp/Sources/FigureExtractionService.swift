@@ -86,7 +86,7 @@ extension AppModel {
             from: figuresURL,
             to: outputURL,
             prefixesToStrip: [baseName, pdfURL.deletingPathExtension().lastPathComponent],
-            outputPrefix: "figurex_"
+            outputPrefix: ""
         )
         let status = images.isEmpty ? "未识别到 Figure/Table。" : "识别到 \(images.count) 个 Figure/Table。"
         return FigureExtractionOutput(status: status, log: log.isEmpty ? "pdffigures2 未返回详细日志。" : log, outputURL: outputURL, images: images)
@@ -125,7 +125,7 @@ private func moveExtractedPNGs(from sourceDirectory: URL, to destinationDirector
                 name = stripped
             }
         }
-        if !name.hasPrefix(outputPrefix) {
+        if !outputPrefix.isEmpty && !name.hasPrefix(outputPrefix) {
             name = "\(outputPrefix)\(name)"
         }
         let destinationURL = uniqueFileURL(in: destinationDirectory, fileName: name)
