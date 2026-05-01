@@ -60,7 +60,7 @@ private struct ToolDetailView: View {
         case .merge:
             MergePDFView(model: model)
         case .bibMerge:
-            BibMergeView(model: model)
+            BibToolView(model: model)
         case .split:
             PageExportView(model: model, mode: .split)
         case .compress:

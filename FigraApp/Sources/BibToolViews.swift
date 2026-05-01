@@ -2,12 +2,12 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct BibMergeView: View {
+struct BibToolView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Header(title: "合并 BibTeX", subtitle: "选择或拖入多个 .bib 文件，按列表顺序合并为一个文件。") {
+            Header(title: "BibTeX 工具", subtitle: "选择或拖入 .bib 文件，按列表顺序合并、去重或格式化导出。") {
                 HStack {
                     Button("添加 BibTeX") {
                         model.addBibFiles(chooseBibFiles())
@@ -20,8 +20,8 @@ struct BibMergeView: View {
             }
 
             FileDropTarget(
-                title: "拖入多个 .bib 文件",
-                subtitle: "导出时每个文件内容之间保留一个空行。",
+                title: "拖入 .bib 文件",
+                subtitle: "可拖入一个或多个文件；列表顺序就是合并和去重时的保留顺序。",
                 symbol: "text.badge.plus",
                 acceptedTypes: [.fileURL, .url, bibContentType()],
                 allowedExtensions: ["bib"],
@@ -41,27 +41,10 @@ struct BibMergeView: View {
                 BibStatCard(title: "生成参考文献", value: "\(model.bibPreviewSummary.outputReferenceCount)")
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Picker("重复项", selection: $model.bibDuplicatePolicy) {
-                        ForEach(BibDuplicatePolicy.allCases) { policy in
-                            Text(policy.rawValue).tag(policy)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 260)
-                    Spacer()
-                    DuplicateMetricBadge(title: "引用键", value: model.bibPreviewSummary.duplicateKeyMatchCount)
-                    DuplicateMetricBadge(title: "标题", value: model.bibPreviewSummary.duplicateTitleMatchCount)
-                }
-            }
-            .padding(14)
-            .background(Color(nsColor: .textBackgroundColor))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.18)))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            BibWorkflowPanel(model: model)
 
             if model.bibItems.isEmpty {
-                EmptyState(symbol: "text.book.closed", title: "未添加 BibTeX", message: "选择或拖入多个 .bib 文件后，这里会显示合并顺序。")
+                EmptyState(symbol: "text.book.closed", title: "未添加 BibTeX", message: "选择或拖入 .bib 文件后，这里会显示处理顺序。")
             } else {
                 List {
                     ForEach(model.bibItems) { item in
@@ -85,9 +68,9 @@ struct BibMergeView: View {
             }
 
             HStack {
-                Button(exportButtonTitle) { model.exportMergedBib() }
+                Button(model.bibTask.exportButtonTitle) { model.exportBibTask() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(model.bibItems.count < 2 || model.isWorking)
+                    .disabled(model.bibItems.isEmpty || model.isWorking)
                 if let outputURL = model.bibOutputURL {
                     Button("在 Finder 中显示") {
                         NSWorkspace.shared.activateFileViewerSelecting([outputURL])
@@ -97,10 +80,6 @@ struct BibMergeView: View {
             }
         }
         .padding(28)
-    }
-
-    private var exportButtonTitle: String {
-        model.bibDuplicatePolicy == .keyAndTitle ? "导出去重 BibTeX" : "导出合并 BibTeX"
     }
 }
 
@@ -125,7 +104,70 @@ private struct BibStatCard: View {
     }
 }
 
-private struct DuplicateMetricBadge: View {
+private struct BibWorkflowPanel: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("任务")
+                    .font(.headline)
+                Spacer()
+                Text(model.bibTask.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Picker("任务", selection: $model.bibTask) {
+                ForEach(BibTask.allCases) { task in
+                    Text(task.rawValue).tag(task)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            HStack(spacing: 8) {
+                BibRuleBadge(
+                    title: "重复判断",
+                    value: model.bibTask.duplicatePolicy == .keyAndTitle ? "引用键 + 标题" : "不清理"
+                )
+                BibRuleBadge(
+                    title: "输出格式",
+                    value: model.bibTask.outputStyle == .formatted ? "统一格式" : "保留原条目"
+                )
+                Spacer()
+                BibMetricBadge(title: "重复引用键", value: model.bibPreviewSummary.duplicateKeyMatchCount)
+                BibMetricBadge(title: "重复标题", value: model.bibPreviewSummary.duplicateTitleMatchCount)
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .textBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.18)))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct BibRuleBadge: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .fontWeight(.semibold)
+        }
+        .font(.caption)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(Capsule())
+    }
+}
+
+private struct BibMetricBadge: View {
     let title: String
     let value: Int
 

@@ -368,14 +368,14 @@ private func copyDroppedFileToTemporaryURL(_ url: URL, directoryName: String, fi
 }
 
 @discardableResult
-func writeMergedBibFiles(_ urls: [URL], to outputURL: URL, duplicatePolicy: BibDuplicatePolicy) throws -> BibMergeSummary {
-    let result = try mergedBibOutput(from: urls, duplicatePolicy: duplicatePolicy)
+func writeProcessedBibFiles(_ urls: [URL], to outputURL: URL, options: BibProcessingOptions) throws -> BibProcessingSummary {
+    let result = try processedBibOutput(from: urls, options: options)
     try result.text.write(to: outputURL, atomically: true, encoding: .utf8)
     return result.summary
 }
 
-func summarizeMergedBibFiles(_ urls: [URL], duplicatePolicy: BibDuplicatePolicy) throws -> BibMergeSummary {
-    try mergedBibOutput(from: urls, duplicatePolicy: duplicatePolicy).summary
+func summarizeBibFiles(_ urls: [URL], options: BibProcessingOptions) throws -> BibProcessingSummary {
+    try processedBibOutput(from: urls, options: options).summary
 }
 
 func countBibReferences(in url: URL) -> Int {
@@ -388,7 +388,7 @@ func countBibReferences(in text: String) -> Int {
     parseBibBlocks(in: text).filter(\.isReference).count
 }
 
-private func mergedBibOutput(from urls: [URL], duplicatePolicy: BibDuplicatePolicy) throws -> (text: String, summary: BibMergeSummary) {
+private func processedBibOutput(from urls: [URL], options: BibProcessingOptions) throws -> (text: String, summary: BibProcessingSummary) {
     let chunks = try readBibChunks(from: urls)
     guard !chunks.isEmpty else {
         throw AppError("选中的 BibTeX 文件没有可合并内容。")
@@ -414,7 +414,7 @@ private func mergedBibOutput(from urls: [URL], duplicatePolicy: BibDuplicatePoli
         guard !cleaned.isEmpty else { continue }
 
         if !block.isReference {
-            keptBlocks.append(cleaned)
+            keptBlocks.append(options.outputStyle == .formatted ? formatBibBlock(block) : cleaned)
             continue
         }
 
@@ -424,14 +424,14 @@ private func mergedBibOutput(from urls: [URL], duplicatePolicy: BibDuplicatePoli
         let keyMatches = normalizedKey.map { !$0.isEmpty && seenKeys.contains($0) } ?? false
         let titleMatches = normalizedTitle.map { !$0.isEmpty && seenTitles.contains($0) } ?? false
 
-        if duplicatePolicy == .keyAndTitle, keyMatches || titleMatches {
+        if options.duplicatePolicy == .keyAndTitle, keyMatches || titleMatches {
             duplicateReferenceCount += 1
             if keyMatches { duplicateKeyMatchCount += 1 }
             if titleMatches { duplicateTitleMatchCount += 1 }
             continue
         }
 
-        keptBlocks.append(cleaned)
+        keptBlocks.append(options.outputStyle == .formatted ? formatBibBlock(block) : cleaned)
         outputReferenceCount += 1
         if let normalizedKey, !normalizedKey.isEmpty {
             seenKeys.insert(normalizedKey)
@@ -441,7 +441,7 @@ private func mergedBibOutput(from urls: [URL], duplicatePolicy: BibDuplicatePoli
         }
     }
 
-    let summary = BibMergeSummary(
+    let summary = BibProcessingSummary(
         inputReferenceCount: inputReferenceCount,
         outputReferenceCount: outputReferenceCount,
         duplicateReferenceCount: duplicateReferenceCount,
@@ -470,12 +470,19 @@ private struct BibBlock {
     let text: String
     let type: String?
     let citationKey: String?
+    let fields: [BibField]
     let normalizedTitle: String?
 
     var isReference: Bool {
         guard let type else { return false }
         return !["comment", "preamble", "string"].contains(type.lowercased())
     }
+}
+
+private struct BibField {
+    let name: String
+    let rawValue: String
+    let normalizedValue: String
 }
 
 private func parseBibBlocks(in text: String) -> [BibBlock] {
@@ -507,7 +514,7 @@ private func parseBibBlocks(in text: String) -> [BibBlock] {
 
 private func appendBibTextBlock(_ text: String, to blocks: inout [BibBlock]) {
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-    blocks.append(BibBlock(text: text, type: nil, citationKey: nil, normalizedTitle: nil))
+    blocks.append(BibBlock(text: text, type: nil, citationKey: nil, fields: [], normalizedTitle: nil))
 }
 
 private func parseBibEntry(in text: String, at atIndex: String.Index) -> (block: BibBlock, endIndex: String.Index)? {
@@ -538,8 +545,9 @@ private func parseBibEntry(in text: String, at atIndex: String.Index) -> (block:
                 let entryText = String(text[atIndex..<endIndex])
                 let lowercasedType = type.lowercased()
                 let citationKey = ["comment", "preamble", "string"].contains(lowercasedType) ? nil : extractBibCitationKey(from: text, openIndex: openIndex, closeIndex: cursor)
-                let title = extractBibField("title", from: text, openIndex: openIndex, closeIndex: cursor)
-                let block = BibBlock(text: entryText, type: type, citationKey: citationKey, normalizedTitle: normalizeBibTitle(title))
+                let fields = citationKey == nil ? [] : parseBibFields(in: text, openIndex: openIndex, closeIndex: cursor)
+                let title = fields.first { $0.name.lowercased() == "title" }?.normalizedValue
+                let block = BibBlock(text: entryText, type: type, citationKey: citationKey, fields: fields, normalizedTitle: normalizeBibTitle(title))
                 return (block, endIndex)
             }
         }
@@ -547,7 +555,7 @@ private func parseBibEntry(in text: String, at atIndex: String.Index) -> (block:
     }
 
     let entryText = String(text[atIndex..<text.endIndex])
-    let block = BibBlock(text: entryText, type: type, citationKey: nil, normalizedTitle: nil)
+    let block = BibBlock(text: entryText, type: type, citationKey: nil, fields: [], normalizedTitle: nil)
     return (block, text.endIndex)
 }
 
@@ -562,16 +570,19 @@ private func extractBibCitationKey(from text: String, openIndex: String.Index, c
     return String(text[keyStart..<cursor]).trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-private func extractBibField(_ fieldName: String, from text: String, openIndex: String.Index, closeIndex: String.Index) -> String? {
+private func parseBibFields(in text: String, openIndex: String.Index, closeIndex: String.Index) -> [BibField] {
+    var fields: [BibField] = []
     var cursor = text.index(after: openIndex)
     while cursor < closeIndex, text[cursor] != "," {
         cursor = text.index(after: cursor)
     }
-    guard cursor < closeIndex else { return nil }
+    guard cursor < closeIndex else { return [] }
     cursor = text.index(after: cursor)
 
     while cursor < closeIndex {
         skipBibFieldSeparators(in: text, cursor: &cursor, endIndex: closeIndex)
+        guard cursor < closeIndex else { break }
+
         let nameStart = cursor
         while cursor < closeIndex, isBibIdentifierCharacter(text[cursor]) {
             cursor = text.index(after: cursor)
@@ -580,74 +591,107 @@ private func extractBibField(_ fieldName: String, from text: String, openIndex: 
             cursor = text.index(after: cursor)
             continue
         }
-        let name = String(text[nameStart..<cursor]).lowercased()
+
+        let name = String(text[nameStart..<cursor]).trimmingCharacters(in: .whitespacesAndNewlines)
         skipWhitespace(in: text, cursor: &cursor)
         guard cursor < closeIndex, text[cursor] == "=" else { continue }
         cursor = text.index(after: cursor)
         skipWhitespace(in: text, cursor: &cursor)
-        let value = parseBibFieldValue(in: text, cursor: &cursor, endIndex: closeIndex)
-        if name == fieldName.lowercased() {
-            return value
-        }
+
+        let rawValue = parseRawBibFieldValue(in: text, cursor: &cursor, endIndex: closeIndex)
+        fields.append(BibField(name: name, rawValue: rawValue, normalizedValue: normalizeBibFieldValue(rawValue)))
     }
 
+    return fields
+}
+
+private func parseRawBibFieldValue(in text: String, cursor: inout String.Index, endIndex: String.Index) -> String {
+    let valueStart = cursor
+    var braceDepth = 0
+    var isQuoted = false
+    var isEscaped = false
+
+    while cursor < endIndex {
+        let character = text[cursor]
+
+        if isQuoted {
+            if character == "\"" && !isEscaped {
+                isQuoted = false
+            }
+            isEscaped = character == "\\" && !isEscaped
+            if character != "\\" {
+                isEscaped = false
+            }
+            cursor = text.index(after: cursor)
+            continue
+        }
+
+        if character == "\"" {
+            isQuoted = true
+        } else if character == "{" {
+            braceDepth += 1
+        } else if character == "}" {
+            braceDepth = max(0, braceDepth - 1)
+        } else if character == ",", braceDepth == 0 {
+            let rawValue = String(text[valueStart..<cursor]).trimmingCharacters(in: .whitespacesAndNewlines)
+            cursor = text.index(after: cursor)
+            return rawValue
+        }
+
+        cursor = text.index(after: cursor)
+    }
+
+    return String(text[valueStart..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func formatBibBlock(_ block: BibBlock) -> String {
+    let cleaned = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard block.isReference, let type = block.type, let citationKey = block.citationKey, !block.fields.isEmpty else {
+        return cleaned
+    }
+
+    let lines = block.fields.enumerated().map { index, field in
+        let suffix = index == block.fields.count - 1 ? "" : ","
+        return "  \(field.name.lowercased()) = \(field.rawValue)\(suffix)"
+    }
+    return "@\(type.lowercased()){\(citationKey.trimmingCharacters(in: .whitespacesAndNewlines)),\n\(lines.joined(separator: "\n"))\n}"
+}
+
+private func normalizeBibFieldValue(_ value: String) -> String {
+    var normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    while let stripped = stripOuterBibDelimiters(from: normalized) {
+        normalized = stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return normalized
+}
+
+private func stripOuterBibDelimiters(from value: String) -> String? {
+    guard value.count >= 2, let first = value.first, let last = value.last else { return nil }
+    if first == "{", last == "}", hasBalancedOuterDelimiters(value, open: "{", close: "}") {
+        return String(value.dropFirst().dropLast())
+    }
+    if first == "\"", last == "\"" {
+        return String(value.dropFirst().dropLast())
+    }
     return nil
 }
 
-private func parseBibFieldValue(in text: String, cursor: inout String.Index, endIndex: String.Index) -> String {
-    guard cursor < endIndex else { return "" }
-    if text[cursor] == "{" {
-        return parseBalancedBibValue(in: text, cursor: &cursor, endIndex: endIndex, open: "{", close: "}")
-    }
-    if text[cursor] == "\"" {
-        return parseQuotedBibValue(in: text, cursor: &cursor, endIndex: endIndex)
-    }
-
-    let valueStart = cursor
-    while cursor < endIndex, text[cursor] != "," {
-        cursor = text.index(after: cursor)
-    }
-    return String(text[valueStart..<cursor]).trimmingCharacters(in: .whitespacesAndNewlines)
-}
-
-private func parseBalancedBibValue(in text: String, cursor: inout String.Index, endIndex: String.Index, open: Character, close: Character) -> String {
-    let valueStart = text.index(after: cursor)
+private func hasBalancedOuterDelimiters(_ value: String, open: Character, close: Character) -> Bool {
     var depth = 0
-    while cursor < endIndex {
-        let character = text[cursor]
+    var cursor = value.startIndex
+    while cursor < value.endIndex {
+        let character = value[cursor]
         if character == open {
             depth += 1
         } else if character == close {
             depth -= 1
-            if depth == 0 {
-                let value = String(text[valueStart..<cursor])
-                cursor = text.index(after: cursor)
-                return value
+            if depth == 0, value.index(after: cursor) < value.endIndex {
+                return false
             }
         }
-        cursor = text.index(after: cursor)
+        cursor = value.index(after: cursor)
     }
-    return String(text[valueStart..<endIndex])
-}
-
-private func parseQuotedBibValue(in text: String, cursor: inout String.Index, endIndex: String.Index) -> String {
-    cursor = text.index(after: cursor)
-    let valueStart = cursor
-    var isEscaped = false
-    while cursor < endIndex {
-        let character = text[cursor]
-        if character == "\"" && !isEscaped {
-            let value = String(text[valueStart..<cursor])
-            cursor = text.index(after: cursor)
-            return value
-        }
-        isEscaped = character == "\\" && !isEscaped
-        if character != "\\" {
-            isEscaped = false
-        }
-        cursor = text.index(after: cursor)
-    }
-    return String(text[valueStart..<endIndex])
+    return depth == 0
 }
 
 private func normalizeBibTitle(_ title: String?) -> String? {

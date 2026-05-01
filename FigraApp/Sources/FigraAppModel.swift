@@ -39,16 +39,16 @@ final class AppModel: ObservableObject {
     @Published var mergeStatus = "添加至少两个 PDF。"
 
     @Published var bibItems: [BibItem] = []
-    @Published var bibStatus = "添加至少两个 BibTeX 文件。"
+    @Published var bibStatus = "添加至少一个 BibTeX 文件。"
     @Published var bibOutputURL: URL?
-    @Published var bibDuplicatePolicy: BibDuplicatePolicy = .keyAndTitle {
+    @Published var bibTask: BibTask = .deduplicate {
         didSet {
             bibOutputURL = nil
             refreshBibStatus()
         }
     }
-    @Published var bibPreviewSummary: BibMergeSummary = .empty
-    @Published var lastMergedBibSummary: BibMergeSummary?
+    @Published var bibPreviewSummary: BibProcessingSummary = .empty
+    @Published var lastBibOutputSummary: BibProcessingSummary?
 
     @Published var organizePDFURL: URL?
     @Published var organizeDocument: PDFDocument?
@@ -478,14 +478,14 @@ final class AppModel: ObservableObject {
             bibItems.append(BibItem(url: url, fileSize: fileSize(url), referenceCount: countBibReferences(in: url)))
         }
         bibOutputURL = nil
-        lastMergedBibSummary = nil
+        lastBibOutputSummary = nil
         refreshBibStatus()
     }
 
     func moveBibItem(from source: IndexSet, to destination: Int) {
         bibItems.move(fromOffsets: source, toOffset: destination)
         bibOutputURL = nil
-        lastMergedBibSummary = nil
+        lastBibOutputSummary = nil
         refreshBibStatus()
     }
 
@@ -493,7 +493,7 @@ final class AppModel: ObservableObject {
         guard let index = bibItems.firstIndex(of: item), index > 0 else { return }
         bibItems.swapAt(index, index - 1)
         bibOutputURL = nil
-        lastMergedBibSummary = nil
+        lastBibOutputSummary = nil
         refreshBibStatus()
     }
 
@@ -501,46 +501,47 @@ final class AppModel: ObservableObject {
         guard let index = bibItems.firstIndex(of: item), index < bibItems.count - 1 else { return }
         bibItems.swapAt(index, index + 1)
         bibOutputURL = nil
-        lastMergedBibSummary = nil
+        lastBibOutputSummary = nil
         refreshBibStatus()
     }
 
     func removeBibItem(_ item: BibItem) {
         bibItems.removeAll { $0.id == item.id }
         bibOutputURL = nil
-        lastMergedBibSummary = nil
+        lastBibOutputSummary = nil
         refreshBibStatus()
     }
 
     func clearBibItems() {
         bibItems.removeAll()
         bibOutputURL = nil
-        lastMergedBibSummary = nil
+        lastBibOutputSummary = nil
         refreshBibStatus()
     }
 
-    func exportMergedBib() {
-        guard bibItems.count >= 2 else {
-            bibStatus = "至少需要两个 BibTeX 文件。"
+    func exportBibTask() {
+        guard !bibItems.isEmpty else {
+            bibStatus = "至少需要一个 BibTeX 文件。"
             return
         }
-        guard let outputURL = chooseSaveBib(defaultName: "merged.bib", defaultDirectory: defaultOutputDirectory) else { return }
+        guard let outputURL = chooseSaveBib(defaultName: defaultBibOutputName(), defaultDirectory: defaultOutputDirectory) else { return }
         let items = bibItems
-        bibStatus = "正在合并 \(items.count) 个 BibTeX 文件..."
-        let duplicatePolicy = bibDuplicatePolicy
+        let task = bibTask
+        bibStatus = "正在处理 \(items.count) 个 BibTeX 文件..."
+        let options = task.processingOptions
         runPDFJob {
-            try writeMergedBibFiles(items.map(\.url), to: outputURL, duplicatePolicy: duplicatePolicy)
+            try writeProcessedBibFiles(items.map(\.url), to: outputURL, options: options)
         } completion: { result in
             switch result {
             case .success(let summary):
                 self.bibOutputURL = outputURL
                 self.bibPreviewSummary = summary
-                self.lastMergedBibSummary = summary
+                self.lastBibOutputSummary = summary
                 self.bibStatus = "已导出：\(outputURL.path) · 生成 \(summary.outputReferenceCount) 篇参考文献，清理 \(summary.duplicateReferenceCount) 条重复项。"
-                self.addRecentTask(tool: "合并 BibTeX", title: outputURL.lastPathComponent, detail: "\(items.count) 个文件 · \(summary.outputReferenceCount) 篇参考文献 · 清理 \(summary.duplicateReferenceCount) 条", outputURL: outputURL)
+                self.addRecentTask(tool: "BibTeX 工具", title: outputURL.lastPathComponent, detail: "\(task.recentTaskDetailPrefix) · \(items.count) 个文件 · \(summary.outputReferenceCount) 篇参考文献 · 清理 \(summary.duplicateReferenceCount) 条", outputURL: outputURL)
                 self.revealIfNeeded(outputURL)
             case .failure(let error):
-                self.bibStatus = "合并失败：\(error.localizedDescription)"
+                self.bibStatus = "BibTeX 处理失败：\(error.localizedDescription)"
             }
         }
     }
@@ -895,22 +896,22 @@ final class AppModel: ObservableObject {
     private func refreshBibStatus() {
         if bibItems.isEmpty {
             bibPreviewSummary = .empty
-            bibStatus = "添加至少两个 BibTeX 文件。"
+            bibStatus = "添加至少一个 BibTeX 文件。"
             return
         }
 
         let totalSize = bibItems.reduce(0) { $0 + $1.fileSize }
         do {
-            let summary = try summarizeMergedBibFiles(bibItems.map(\.url), duplicatePolicy: bibDuplicatePolicy)
+            let summary = try summarizeBibFiles(bibItems.map(\.url), options: bibTask.processingOptions)
             bibPreviewSummary = summary
-            if let lastMergedBibSummary {
-                bibStatus = "\(bibItems.count) 个文件，输入 \(summary.inputReferenceCount) 篇参考文献，最终生成 \(lastMergedBibSummary.outputReferenceCount) 篇。"
+            if let lastBibOutputSummary {
+                bibStatus = "\(bibItems.count) 个文件，输入 \(summary.inputReferenceCount) 篇参考文献，最终生成 \(lastBibOutputSummary.outputReferenceCount) 篇。"
             } else {
                 bibStatus = "\(bibItems.count) 个文件，输入 \(summary.inputReferenceCount) 篇参考文献，预计生成 \(summary.outputReferenceCount) 篇，合计 \(formatFileSize(totalSize))。"
             }
         } catch {
             let inputReferenceCount = bibItems.reduce(0) { $0 + $1.referenceCount }
-            bibPreviewSummary = BibMergeSummary(
+            bibPreviewSummary = BibProcessingSummary(
                 inputReferenceCount: inputReferenceCount,
                 outputReferenceCount: inputReferenceCount,
                 duplicateReferenceCount: 0,
@@ -918,6 +919,22 @@ final class AppModel: ObservableObject {
                 duplicateTitleMatchCount: 0
             )
             bibStatus = "\(bibItems.count) 个文件，输入 \(inputReferenceCount) 篇参考文献，合计 \(formatFileSize(totalSize))。"
+        }
+    }
+
+    private func defaultBibOutputName() -> String {
+        if bibItems.count == 1, bibTask.outputStyle == .formatted {
+            return "\(safeName(bibItems[0].url.deletingPathExtension().lastPathComponent))_formatted.bib"
+        }
+        switch bibTask {
+        case .merge:
+            return "merged.bib"
+        case .deduplicate:
+            return "deduplicated.bib"
+        case .format:
+            return "formatted.bib"
+        case .deduplicateAndFormat:
+            return "deduplicated-formatted.bib"
         }
     }
 
