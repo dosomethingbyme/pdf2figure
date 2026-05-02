@@ -44,6 +44,7 @@ struct FileDropTarget: View {
     let title: String
     let subtitle: String
     let symbol: String
+    var minHeight: CGFloat = 108
     let acceptedTypes: [UTType]
     let allowedExtensions: Set<String>
     let fileRepresentationType: UTType?
@@ -60,7 +61,7 @@ struct FileDropTarget: View {
             Text(title).font(.headline)
             Text(subtitle).font(.caption).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, minHeight: 108)
+        .frame(maxWidth: .infinity, minHeight: minHeight)
         .background(isTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .textBackgroundColor))
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [7, 6])).foregroundStyle(isTargeted ? Color.accentColor : Color.secondary.opacity(0.35)))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))

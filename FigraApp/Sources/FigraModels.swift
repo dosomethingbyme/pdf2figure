@@ -173,8 +173,21 @@ enum BibTask: String, CaseIterable, Identifiable {
 }
 
 struct BibProcessingOptions {
-    let duplicatePolicy: BibDuplicatePolicy
-    let outputStyle: BibOutputStyle
+    let removeDuplicates: Bool
+    let formatOutput: Bool
+    var overrides: [String: BibGroupOverride] = [:]
+
+    init(removeDuplicates: Bool, formatOutput: Bool, overrides: [String: BibGroupOverride] = [:]) {
+        self.removeDuplicates = removeDuplicates
+        self.formatOutput = formatOutput
+        self.overrides = overrides
+    }
+
+    init(duplicatePolicy: BibDuplicatePolicy, outputStyle: BibOutputStyle) {
+        self.removeDuplicates = duplicatePolicy == .keyAndTitle
+        self.formatOutput = outputStyle == .formatted
+        self.overrides = [:]
+    }
 }
 
 struct BibProcessingSummary {
@@ -183,14 +196,121 @@ struct BibProcessingSummary {
     let duplicateReferenceCount: Int
     let duplicateKeyMatchCount: Int
     let duplicateTitleMatchCount: Int
+    let duplicateDOIMatchCount: Int
+    let keyConflictCount: Int
+    let suspiciousDuplicateCount: Int
+    let parseWarningCount: Int
+    let nonReferenceCount: Int
+    let manualOverrideCount: Int
 
     static let empty = BibProcessingSummary(
         inputReferenceCount: 0,
         outputReferenceCount: 0,
         duplicateReferenceCount: 0,
         duplicateKeyMatchCount: 0,
-        duplicateTitleMatchCount: 0
+        duplicateTitleMatchCount: 0,
+        duplicateDOIMatchCount: 0,
+        keyConflictCount: 0,
+        suspiciousDuplicateCount: 0,
+        parseWarningCount: 0,
+        nonReferenceCount: 0,
+        manualOverrideCount: 0
     )
+}
+
+enum BibEntryDecision: String, CaseIterable, Identifiable {
+    case keep = "保留"
+    case removeDuplicate = "将移除"
+    case keyConflict = "Key 冲突"
+    case suspiciousDuplicate = "疑似重复"
+    case keepNonReference = "非文献项"
+    case parseWarning = "解析异常"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .keep: return "checkmark.circle.fill"
+        case .removeDuplicate: return "minus.circle.fill"
+        case .keyConflict: return "exclamationmark.triangle.fill"
+        case .suspiciousDuplicate: return "questionmark.circle.fill"
+        case .keepNonReference: return "text.alignleft"
+        case .parseWarning: return "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+enum BibDuplicateReason: String {
+    case doi = "DOI 相同"
+    case arxiv = "arXiv ID 相同"
+    case citationKey = "引用键相同"
+    case title = "标题相同"
+    case citationKeyAndTitle = "引用键和标题相同"
+    case keyConflict = "引用键冲突"
+    case suspiciousTitle = "标题疑似重复"
+}
+
+struct BibEntryPreview: Identifiable, Equatable {
+    let id: String
+    let sourceFileName: String
+    let sourceURL: URL
+    let sourceFileIndex: Int
+    let entryIndex: Int
+    let type: String?
+    let citationKey: String?
+    let title: String?
+    let author: String?
+    let year: String?
+    let doi: String?
+    let arxivID: String?
+    let journal: String?
+    let rawText: String
+    let outputText: String
+    let decision: BibEntryDecision
+    let duplicateGroupID: String?
+    let duplicateReason: BibDuplicateReason?
+    let keptEntryID: String?
+
+    var displayKey: String { citationKey?.isEmpty == false ? citationKey! : "未命名条目" }
+    var displayType: String { type?.isEmpty == false ? type! : "text" }
+    var displayTitle: String { title?.isEmpty == false ? title! : "无标题字段" }
+    var displayYear: String { year?.isEmpty == false ? year! : "----" }
+    var isReference: Bool { type != nil && decision != .keepNonReference && decision != .parseWarning }
+}
+
+struct BibDuplicateGroup: Identifiable, Equatable {
+    let id: String
+    let reason: BibDuplicateReason
+    let keptEntry: BibEntryPreview
+    let removedEntries: [BibEntryPreview]
+    let candidateEntries: [BibEntryPreview]
+    let isAutoRemoval: Bool
+    let isOverridden: Bool
+
+    var title: String {
+        keptEntry.title ?? removedEntries.first(where: { $0.title != nil })?.title ?? keptEntry.displayKey
+    }
+}
+
+enum BibGroupResolution: Equatable {
+    case automatic
+    case keepEntry(String)
+    case keepAll
+}
+
+struct BibGroupOverride: Equatable {
+    let resolution: BibGroupResolution
+}
+
+struct BibPreviewResult {
+    let outputText: String
+    let entries: [BibEntryPreview]
+    let duplicateGroups: [BibDuplicateGroup]
+    let removedEntries: [BibEntryPreview]
+    let warningEntries: [BibEntryPreview]
+    let summary: BibProcessingSummary
+
+    static let empty = BibPreviewResult(outputText: "", entries: [], duplicateGroups: [], removedEntries: [], warningEntries: [], summary: .empty)
 }
 
 enum FigureKind: String, CaseIterable, Identifiable {

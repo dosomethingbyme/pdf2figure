@@ -369,13 +369,17 @@ private func copyDroppedFileToTemporaryURL(_ url: URL, directoryName: String, fi
 
 @discardableResult
 func writeProcessedBibFiles(_ urls: [URL], to outputURL: URL, options: BibProcessingOptions) throws -> BibProcessingSummary {
-    let result = try processedBibOutput(from: urls, options: options)
-    try result.text.write(to: outputURL, atomically: true, encoding: .utf8)
+    let result = try buildBibPreview(from: urls, options: options)
+    try result.outputText.write(to: outputURL, atomically: true, encoding: .utf8)
     return result.summary
 }
 
 func summarizeBibFiles(_ urls: [URL], options: BibProcessingOptions) throws -> BibProcessingSummary {
-    try processedBibOutput(from: urls, options: options).summary
+    try buildBibPreview(from: urls, options: options).summary
+}
+
+func previewBibFiles(_ urls: [URL], options: BibProcessingOptions) throws -> BibPreviewResult {
+    try buildBibPreview(from: urls, options: options)
 }
 
 func countBibReferences(in url: URL) -> Int {
@@ -388,82 +392,477 @@ func countBibReferences(in text: String) -> Int {
     parseBibBlocks(in: text).filter(\.isReference).count
 }
 
-private func processedBibOutput(from urls: [URL], options: BibProcessingOptions) throws -> (text: String, summary: BibProcessingSummary) {
+private func buildBibPreview(from urls: [URL], options: BibProcessingOptions) throws -> BibPreviewResult {
     let chunks = try readBibChunks(from: urls)
     guard !chunks.isEmpty else {
         throw AppError("选中的 BibTeX 文件没有可合并内容。")
     }
 
-    let merged = chunks.joined(separator: "\n\n")
-    let blocks = parseBibBlocks(in: merged)
+    let sourceBlocks = chunks.flatMap { chunk in
+        parseBibBlocks(in: chunk.text).enumerated().map { index, block in
+            BibSourceBlock(url: chunk.url, sourceFileIndex: chunk.sourceFileIndex, entryIndex: index + 1, block: block)
+        }
+    }
+    let blocks = sourceBlocks.map(\.block)
     guard blocks.contains(where: \.isReference) else {
         throw AppError("选中的 BibTeX 文件没有可合并参考文献。")
     }
 
-    var keptBlocks: [String] = []
-    var seenKeys: Set<String> = []
-    var seenTitles: Set<String> = []
+    var seenKeys: [String: BibEntryPreview] = [:]
+    var seenTitles: [String: BibEntryPreview] = [:]
+    var seenDOIs: [String: BibEntryPreview] = [:]
+    var seenArxivIDs: [String: BibEntryPreview] = [:]
+    var duplicateBuckets: [String: (reason: BibDuplicateReason, candidates: [BibEntryPreview], autoRemoval: Bool)] = [:]
+    var entries: [BibEntryPreview] = []
     var inputReferenceCount = 0
     var outputReferenceCount = 0
-    var duplicateReferenceCount = 0
     var duplicateKeyMatchCount = 0
     var duplicateTitleMatchCount = 0
+    var duplicateDOIMatchCount = 0
+    var keyConflictCount = 0
+    var suspiciousDuplicateCount = 0
+    var parseWarningCount = 0
+    var nonReferenceCount = 0
 
-    for block in blocks {
+    for sourceBlock in sourceBlocks {
+        let block = sourceBlock.block
         let cleaned = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { continue }
+        let rendered = options.formatOutput ? formatBibBlock(block) : cleaned
 
         if !block.isReference {
-            keptBlocks.append(options.outputStyle == .formatted ? formatBibBlock(block) : cleaned)
+            let decision: BibEntryDecision = block.type == nil ? .parseWarning : .keepNonReference
+            if decision == .parseWarning { parseWarningCount += 1 } else { nonReferenceCount += 1 }
+            let entry = makeBibEntryPreview(sourceBlock: sourceBlock, outputText: rendered, decision: decision)
+            entries.append(entry)
             continue
         }
 
         inputReferenceCount += 1
         let normalizedKey = block.citationKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let normalizedTitle = block.normalizedTitle
-        let keyMatches = normalizedKey.map { !$0.isEmpty && seenKeys.contains($0) } ?? false
-        let titleMatches = normalizedTitle.map { !$0.isEmpty && seenTitles.contains($0) } ?? false
+        let normalizedDOI = normalizeBibDOI(bibFieldValue("doi", in: block))
+        let normalizedArxivID = normalizeArxivID(from: block)
+        let keyMatch = normalizedKey.flatMap { !$0.isEmpty ? seenKeys[$0] : nil }
+        let titleMatch = normalizedTitle.flatMap { !$0.isEmpty ? seenTitles[$0] : nil }
+        let doiMatch = normalizedDOI.flatMap { !$0.isEmpty ? seenDOIs[$0] : nil }
+        let arxivMatch = normalizedArxivID.flatMap { !$0.isEmpty ? seenArxivIDs[$0] : nil }
 
-        if options.duplicatePolicy == .keyAndTitle, keyMatches || titleMatches {
-            duplicateReferenceCount += 1
-            if keyMatches { duplicateKeyMatchCount += 1 }
-            if titleMatches { duplicateTitleMatchCount += 1 }
+        var matchedEntry: BibEntryPreview?
+        var reason: BibDuplicateReason?
+        var autoRemoval = false
+        if doiMatch != nil {
+            matchedEntry = doiMatch
+            reason = .doi
+            autoRemoval = true
+            duplicateDOIMatchCount += 1
+        } else if arxivMatch != nil {
+            matchedEntry = arxivMatch
+            reason = .arxiv
+            autoRemoval = true
+        } else if let keyMatch {
+            matchedEntry = keyMatch
+            if hasCitationKeyConflict(block: block, normalizedTitle: normalizedTitle, normalizedDOI: normalizedDOI, normalizedArxivID: normalizedArxivID, matchedEntry: keyMatch) {
+                reason = .keyConflict
+                keyConflictCount += 1
+            } else {
+                reason = titleMatch != nil ? .citationKeyAndTitle : .citationKey
+                autoRemoval = true
+                duplicateKeyMatchCount += 1
+            }
+        } else if titleMatch != nil {
+            matchedEntry = titleMatch
+            reason = .title
+            autoRemoval = true
+            duplicateTitleMatchCount += 1
+        } else if let suspicious = suspiciousTitleMatch(for: normalizedTitle, in: seenTitles) {
+            reason = .suspiciousTitle
+            autoRemoval = false
+            suspiciousDuplicateCount += 1
+            let entry = makeBibEntryPreview(sourceBlock: sourceBlock, outputText: rendered, decision: .keep)
+            let groupID = bibGroupID(reason: .suspiciousTitle, key: suspicious.key)
+            entries.append(entry.withDuplicate(groupID: groupID, reason: .suspiciousTitle, keptEntryID: suspicious.entry.id, decision: .suspiciousDuplicate))
+            appendBibDuplicateBucket(&duplicateBuckets, groupID: groupID, reason: .suspiciousTitle, candidates: [suspicious.entry, entry], autoRemoval: false)
+            insertSeenBibEntry(entry, key: normalizedKey, title: normalizedTitle, doi: normalizedDOI, arxivID: normalizedArxivID, seenKeys: &seenKeys, seenTitles: &seenTitles, seenDOIs: &seenDOIs, seenArxivIDs: &seenArxivIDs)
             continue
         }
 
-        keptBlocks.append(options.outputStyle == .formatted ? formatBibBlock(block) : cleaned)
-        outputReferenceCount += 1
-        if let normalizedKey, !normalizedKey.isEmpty {
-            seenKeys.insert(normalizedKey)
+        let groupID = reason.map {
+            bibGroupID(reason: $0, key: duplicateMatchKey(reason: $0, entry: sourceBlock, fallback: normalizedDOI ?? normalizedArxivID ?? normalizedTitle ?? normalizedKey ?? sourceBlock.id))
         }
-        if let normalizedTitle, !normalizedTitle.isEmpty {
-            seenTitles.insert(normalizedTitle)
+        let entry = makeBibEntryPreview(
+            sourceBlock: sourceBlock,
+            outputText: rendered,
+            decision: reason == .keyConflict ? .keyConflict : .keep,
+            duplicateGroupID: groupID,
+            duplicateReason: reason,
+            keptEntryID: matchedEntry?.id
+        )
+        entries.append(entry)
+        if let groupID, let reason, let matchedEntry {
+            appendBibDuplicateBucket(&duplicateBuckets, groupID: groupID, reason: reason, candidates: [matchedEntry, entry], autoRemoval: autoRemoval)
         }
+        insertSeenBibEntry(entry, key: normalizedKey, title: normalizedTitle, doi: normalizedDOI, arxivID: normalizedArxivID, seenKeys: &seenKeys, seenTitles: &seenTitles, seenDOIs: &seenDOIs, seenArxivIDs: &seenArxivIDs)
     }
 
+    let resolved = applyBibOverrides(entries: entries, buckets: duplicateBuckets, options: options)
+    entries = resolved.entries
+    let outputEntries = resolved.outputEntries
+    outputReferenceCount = outputEntries.filter(\.isReference).count
+
+    let duplicateGroups = resolved.groups
+        .sorted {
+            if $0.keptEntry.sourceFileIndex == $1.keptEntry.sourceFileIndex {
+                return $0.keptEntry.entryIndex < $1.keptEntry.entryIndex
+            }
+            return $0.keptEntry.sourceFileIndex < $1.keptEntry.sourceFileIndex
+        }
     let summary = BibProcessingSummary(
         inputReferenceCount: inputReferenceCount,
         outputReferenceCount: outputReferenceCount,
-        duplicateReferenceCount: duplicateReferenceCount,
+        duplicateReferenceCount: resolved.removedEntries.count,
         duplicateKeyMatchCount: duplicateKeyMatchCount,
-        duplicateTitleMatchCount: duplicateTitleMatchCount
+        duplicateTitleMatchCount: duplicateTitleMatchCount,
+        duplicateDOIMatchCount: duplicateDOIMatchCount,
+        keyConflictCount: keyConflictCount,
+        suspiciousDuplicateCount: suspiciousDuplicateCount,
+        parseWarningCount: parseWarningCount,
+        nonReferenceCount: nonReferenceCount,
+        manualOverrideCount: options.overrides.count
     )
-    return (keptBlocks.joined(separator: "\n\n") + "\n", summary)
+    let outputText = outputEntries.map(\.outputText).joined(separator: "\n\n") + "\n"
+    return BibPreviewResult(
+        outputText: outputText,
+        entries: entries,
+        duplicateGroups: duplicateGroups,
+        removedEntries: resolved.removedEntries,
+        warningEntries: entries.filter { $0.decision == .keyConflict || $0.decision == .suspiciousDuplicate || $0.decision == .parseWarning },
+        summary: summary
+    )
 }
 
-private func readBibChunks(from urls: [URL]) throws -> [String] {
-    var chunks: [String] = []
-    for url in urls {
+private struct BibSourceChunk {
+    let url: URL
+    let sourceFileIndex: Int
+    let text: String
+}
+
+private struct BibSourceBlock {
+    let url: URL
+    let sourceFileIndex: Int
+    let entryIndex: Int
+    let block: BibBlock
+
+    var id: String { "\(sourceFileIndex + 1)-\(entryIndex)" }
+}
+
+private func readBibChunks(from urls: [URL]) throws -> [BibSourceChunk] {
+    var chunks: [BibSourceChunk] = []
+    for (index, url) in urls.enumerated() {
         let data = try Data(contentsOf: url)
         guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
             throw AppError("无法读取 BibTeX 文本：\(url.lastPathComponent)")
         }
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleaned.isEmpty {
-            chunks.append(cleaned)
+            chunks.append(BibSourceChunk(url: url, sourceFileIndex: index, text: cleaned))
         }
     }
     return chunks
+}
+
+private func makeBibEntryPreview(
+    sourceBlock: BibSourceBlock,
+    outputText: String,
+    decision: BibEntryDecision,
+    duplicateGroupID: String? = nil,
+    duplicateReason: BibDuplicateReason? = nil,
+    keptEntryID: String? = nil
+) -> BibEntryPreview {
+    let block = sourceBlock.block
+    return BibEntryPreview(
+        id: sourceBlock.id,
+        sourceFileName: sourceBlock.url.lastPathComponent,
+        sourceURL: sourceBlock.url,
+        sourceFileIndex: sourceBlock.sourceFileIndex,
+        entryIndex: sourceBlock.entryIndex,
+        type: block.type,
+        citationKey: block.citationKey,
+        title: bibFieldValue("title", in: block),
+        author: bibFieldValue("author", in: block),
+        year: bibFieldValue("year", in: block),
+        doi: bibFieldValue("doi", in: block),
+        arxivID: normalizeArxivID(from: block),
+        journal: bibFieldValue("journal", in: block) ?? bibFieldValue("booktitle", in: block),
+        rawText: block.text.trimmingCharacters(in: .whitespacesAndNewlines),
+        outputText: outputText,
+        decision: decision,
+        duplicateGroupID: duplicateGroupID,
+        duplicateReason: duplicateReason,
+        keptEntryID: keptEntryID
+    )
+}
+
+private extension BibEntryPreview {
+    func withDuplicate(groupID: String?, reason: BibDuplicateReason?, keptEntryID: String?, decision: BibEntryDecision? = nil) -> BibEntryPreview {
+        BibEntryPreview(
+            id: id,
+            sourceFileName: sourceFileName,
+            sourceURL: sourceURL,
+            sourceFileIndex: sourceFileIndex,
+            entryIndex: entryIndex,
+            type: type,
+            citationKey: citationKey,
+            title: title,
+            author: author,
+            year: year,
+            doi: doi,
+            arxivID: arxivID,
+            journal: journal,
+            rawText: rawText,
+            outputText: outputText,
+            decision: decision ?? self.decision,
+            duplicateGroupID: groupID,
+            duplicateReason: reason,
+            keptEntryID: keptEntryID
+        )
+    }
+
+    func withDecision(_ decision: BibEntryDecision, keptEntryID: String? = nil) -> BibEntryPreview {
+        withDuplicate(groupID: duplicateGroupID, reason: duplicateReason, keptEntryID: keptEntryID ?? self.keptEntryID, decision: decision)
+    }
+}
+
+private func normalizeBibDOI(_ value: String?) -> String? {
+    guard var value else { return nil }
+    value = normalizeBibFieldValue(value)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    let prefixes = ["https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/", "doi:"]
+    for prefix in prefixes where value.hasPrefix(prefix) {
+        value.removeFirst(prefix.count)
+        break
+    }
+    value = value.trimmingCharacters(in: CharacterSet(charactersIn: " .,/"))
+    return value.hasPrefix("10.") && value.count >= 6 ? value : nil
+}
+
+private func normalizeArxivID(from block: BibBlock) -> String? {
+    let candidates = [
+        bibFieldValue("eprint", in: block),
+        bibFieldValue("arxivid", in: block),
+        bibFieldValue("url", in: block),
+        bibFieldValue("doi", in: block)
+    ].compactMap { $0 }
+    for candidate in candidates {
+        if let id = extractArxivID(from: candidate) {
+            return id
+        }
+    }
+    return nil
+}
+
+private func extractArxivID(from value: String) -> String? {
+    let lowered = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let patterns = [
+        #"arxiv[:/ ]+([a-z\-]+\/\d{7}|\d{4}\.\d{4,5}(?:v\d+)?)"#,
+        #"abs/([a-z\-]+\/\d{7}|\d{4}\.\d{4,5}(?:v\d+)?)"#,
+        #"^([a-z\-]+\/\d{7}|\d{4}\.\d{4,5}(?:v\d+)?)$"#
+    ]
+    for pattern in patterns {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+        let range = NSRange(lowered.startIndex..<lowered.endIndex, in: lowered)
+        guard let match = regex.firstMatch(in: lowered, range: range), match.numberOfRanges > 1, let idRange = Range(match.range(at: 1), in: lowered) else { continue }
+        return String(lowered[idRange]).replacingOccurrences(of: #"v\d+$"#, with: "", options: .regularExpression)
+    }
+    return nil
+}
+
+private func titlesCompatible(_ normalizedTitle: String?, _ matchedTitle: String?) -> Bool {
+    guard let normalizedTitle, let matchedNormalized = normalizeBibTitle(matchedTitle) else { return false }
+    return normalizedTitle == matchedNormalized
+}
+
+private func hasCitationKeyConflict(
+    block: BibBlock,
+    normalizedTitle: String?,
+    normalizedDOI: String?,
+    normalizedArxivID: String?,
+    matchedEntry: BibEntryPreview
+) -> Bool {
+    if !titlesCompatible(normalizedTitle, matchedEntry.title) {
+        return true
+    }
+    if let normalizedDOI, let matchedDOI = normalizeBibDOI(matchedEntry.doi), normalizedDOI != matchedDOI {
+        return true
+    }
+    if let normalizedArxivID, let matchedArxivID = matchedEntry.arxivID, normalizedArxivID != matchedArxivID {
+        return true
+    }
+    if let year = bibFieldValue("year", in: block)?.trimmingCharacters(in: .whitespacesAndNewlines),
+       let matchedYear = matchedEntry.year?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !year.isEmpty,
+       !matchedYear.isEmpty,
+       year != matchedYear {
+        return true
+    }
+    return false
+}
+
+private func suspiciousTitleMatch(for normalizedTitle: String?, in seenTitles: [String: BibEntryPreview]) -> (key: String, entry: BibEntryPreview)? {
+    guard let normalizedTitle, normalizedTitle.count >= 18 else { return nil }
+    let tokens = Set(normalizedTitle.split(separator: " ").map(String.init).filter { $0.count > 2 })
+    guard tokens.count >= 4 else { return nil }
+    var best: (key: String, entry: BibEntryPreview, score: Double)?
+    for (key, entry) in seenTitles {
+        let otherTokens = Set(key.split(separator: " ").map(String.init).filter { $0.count > 2 })
+        guard otherTokens.count >= 4 else { continue }
+        let intersection = tokens.intersection(otherTokens).count
+        let union = tokens.union(otherTokens).count
+        let score = union == 0 ? 0 : Double(intersection) / Double(union)
+        if score >= 0.82, score > (best?.score ?? 0) {
+            best = (key, entry, score)
+        }
+    }
+    return best.map { ($0.key, $0.entry) }
+}
+
+private func bibGroupID(reason: BibDuplicateReason, key: String) -> String {
+    "\(reason.rawValue):\(key)"
+}
+
+private func duplicateMatchKey(reason: BibDuplicateReason, entry: BibSourceBlock, fallback: String) -> String {
+    switch reason {
+    case .doi:
+        return normalizeBibDOI(bibFieldValue("doi", in: entry.block)) ?? fallback
+    case .arxiv:
+        return normalizeArxivID(from: entry.block) ?? fallback
+    case .citationKey, .citationKeyAndTitle, .keyConflict:
+        return entry.block.citationKey?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? fallback
+    case .title, .suspiciousTitle:
+        return entry.block.normalizedTitle ?? fallback
+    }
+}
+
+private func appendBibDuplicateBucket(
+    _ buckets: inout [String: (reason: BibDuplicateReason, candidates: [BibEntryPreview], autoRemoval: Bool)],
+    groupID: String,
+    reason: BibDuplicateReason,
+    candidates: [BibEntryPreview],
+    autoRemoval: Bool
+) {
+    var bucket = buckets[groupID] ?? (reason: reason, candidates: [], autoRemoval: autoRemoval)
+    bucket.reason = mergeDuplicateReasons(bucket.reason, reason)
+    bucket.autoRemoval = bucket.autoRemoval || autoRemoval
+    for candidate in candidates where !bucket.candidates.contains(where: { $0.id == candidate.id }) {
+        bucket.candidates.append(candidate)
+    }
+    buckets[groupID] = bucket
+}
+
+private func insertSeenBibEntry(
+    _ entry: BibEntryPreview,
+    key: String?,
+    title: String?,
+    doi: String?,
+    arxivID: String?,
+    seenKeys: inout [String: BibEntryPreview],
+    seenTitles: inout [String: BibEntryPreview],
+    seenDOIs: inout [String: BibEntryPreview],
+    seenArxivIDs: inout [String: BibEntryPreview]
+) {
+    if let key, !key.isEmpty, seenKeys[key] == nil {
+        seenKeys[key] = entry
+    }
+    if let title, !title.isEmpty, seenTitles[title] == nil {
+        seenTitles[title] = entry
+    }
+    if let doi, !doi.isEmpty, seenDOIs[doi] == nil {
+        seenDOIs[doi] = entry
+    }
+    if let arxivID, !arxivID.isEmpty, seenArxivIDs[arxivID] == nil {
+        seenArxivIDs[arxivID] = entry
+    }
+}
+
+private func applyBibOverrides(
+    entries: [BibEntryPreview],
+    buckets: [String: (reason: BibDuplicateReason, candidates: [BibEntryPreview], autoRemoval: Bool)],
+    options: BibProcessingOptions
+) -> (entries: [BibEntryPreview], outputEntries: [BibEntryPreview], removedEntries: [BibEntryPreview], groups: [BibDuplicateGroup]) {
+    var updatedByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0.withDuplicate(groupID: nil, reason: nil, keptEntryID: nil, decision: $0.decision == .parseWarning || $0.decision == .keepNonReference ? $0.decision : .keep)) })
+    var removedIDs = Set<String>()
+    var groups: [BibDuplicateGroup] = []
+
+    for (groupID, bucket) in buckets {
+        let candidates = bucket.candidates.sorted {
+            if $0.sourceFileIndex == $1.sourceFileIndex {
+                return $0.entryIndex < $1.entryIndex
+            }
+            return $0.sourceFileIndex < $1.sourceFileIndex
+        }
+        guard let defaultKept = candidates.first else { continue }
+        let override = options.overrides[groupID]
+        let keptEntry: BibEntryPreview
+        switch override?.resolution {
+        case .keepEntry(let id):
+            keptEntry = candidates.first { $0.id == id } ?? defaultKept
+        case .keepAll, .automatic, .none:
+            keptEntry = defaultKept
+        }
+
+        let shouldRemove = options.removeDuplicates && bucket.autoRemoval && override?.resolution != .keepAll
+        var removedEntries: [BibEntryPreview] = []
+
+        for candidate in candidates {
+            var decision: BibEntryDecision = .keep
+            if bucket.reason == .keyConflict {
+                decision = .keyConflict
+            } else if bucket.reason == .suspiciousTitle {
+                decision = .suspiciousDuplicate
+            } else if shouldRemove && candidate.id != keptEntry.id {
+                decision = .removeDuplicate
+                removedIDs.insert(candidate.id)
+            } else {
+                removedIDs.remove(candidate.id)
+            }
+
+            let updated = candidate.withDuplicate(groupID: groupID, reason: bucket.reason, keptEntryID: keptEntry.id, decision: decision)
+            updatedByID[candidate.id] = updated
+            if decision == .removeDuplicate {
+                removedEntries.append(updated)
+            }
+        }
+
+        let resolvedKept = updatedByID[keptEntry.id] ?? keptEntry
+        groups.append(BibDuplicateGroup(
+            id: groupID,
+            reason: bucket.reason,
+            keptEntry: resolvedKept,
+            removedEntries: removedEntries,
+            candidateEntries: candidates.compactMap { updatedByID[$0.id] },
+            isAutoRemoval: bucket.autoRemoval,
+            isOverridden: override != nil
+        ))
+    }
+
+    let updatedEntries = entries.compactMap { updatedByID[$0.id] }
+    let outputEntries = updatedEntries.filter { !removedIDs.contains($0.id) }
+    let removedEntries = updatedEntries.filter { removedIDs.contains($0.id) }
+    return (updatedEntries, outputEntries, removedEntries, groups)
+}
+
+private func bibFieldValue(_ name: String, in block: BibBlock) -> String? {
+    block.fields.first { $0.name.lowercased() == name }?.normalizedValue
+}
+
+private func mergeDuplicateReasons(_ lhs: BibDuplicateReason, _ rhs: BibDuplicateReason) -> BibDuplicateReason {
+    if lhs == rhs { return lhs }
+    if lhs == .keyConflict || rhs == .keyConflict { return .keyConflict }
+    if lhs == .suspiciousTitle || rhs == .suspiciousTitle { return .suspiciousTitle }
+    if lhs == .doi || rhs == .doi { return .doi }
+    if lhs == .arxiv || rhs == .arxiv { return .arxiv }
+    return .citationKeyAndTitle
 }
 
 private struct BibBlock {

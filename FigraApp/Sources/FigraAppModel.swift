@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
     private var splitThumbnailToken = UUID()
     private var organizeThumbnailToken = UUID()
     private var figureExtractionToken = UUID()
+    private var bibPreviewToken = UUID()
 
     @Published var selectedTool: Tool = .figureExtract
     @Published var dpi: DPI = .dpi600
@@ -41,13 +42,29 @@ final class AppModel: ObservableObject {
     @Published var bibItems: [BibItem] = []
     @Published var bibStatus = "添加至少一个 BibTeX 文件。"
     @Published var bibOutputURL: URL?
-    @Published var bibTask: BibTask = .deduplicate {
+    @Published var bibRemoveDuplicates = true {
         didSet {
             bibOutputURL = nil
             refreshBibStatus()
         }
     }
+    @Published var bibFormatOutput = true {
+        didSet {
+            bibOutputURL = nil
+            refreshBibStatus()
+        }
+    }
+    @Published var bibGroupOverrides: [String: BibGroupOverride] = [:]
+    @Published var bibTask: BibTask = .deduplicate {
+        didSet {
+            bibRemoveDuplicates = bibTask.duplicatePolicy == .keyAndTitle
+            bibFormatOutput = bibTask.outputStyle == .formatted
+            bibOutputURL = nil
+            refreshBibStatus()
+        }
+    }
     @Published var bibPreviewSummary: BibProcessingSummary = .empty
+    @Published var bibPreviewResult: BibPreviewResult = .empty
     @Published var lastBibOutputSummary: BibProcessingSummary?
 
     @Published var organizePDFURL: URL?
@@ -477,6 +494,7 @@ final class AppModel: ObservableObject {
             guard !bibItems.contains(where: { $0.url == url }) else { continue }
             bibItems.append(BibItem(url: url, fileSize: fileSize(url), referenceCount: countBibReferences(in: url)))
         }
+        bibGroupOverrides.removeAll()
         bibOutputURL = nil
         lastBibOutputSummary = nil
         refreshBibStatus()
@@ -484,6 +502,7 @@ final class AppModel: ObservableObject {
 
     func moveBibItem(from source: IndexSet, to destination: Int) {
         bibItems.move(fromOffsets: source, toOffset: destination)
+        bibGroupOverrides.removeAll()
         bibOutputURL = nil
         lastBibOutputSummary = nil
         refreshBibStatus()
@@ -492,6 +511,7 @@ final class AppModel: ObservableObject {
     func moveBibItemUp(_ item: BibItem) {
         guard let index = bibItems.firstIndex(of: item), index > 0 else { return }
         bibItems.swapAt(index, index - 1)
+        bibGroupOverrides.removeAll()
         bibOutputURL = nil
         lastBibOutputSummary = nil
         refreshBibStatus()
@@ -500,6 +520,7 @@ final class AppModel: ObservableObject {
     func moveBibItemDown(_ item: BibItem) {
         guard let index = bibItems.firstIndex(of: item), index < bibItems.count - 1 else { return }
         bibItems.swapAt(index, index + 1)
+        bibGroupOverrides.removeAll()
         bibOutputURL = nil
         lastBibOutputSummary = nil
         refreshBibStatus()
@@ -507,6 +528,7 @@ final class AppModel: ObservableObject {
 
     func removeBibItem(_ item: BibItem) {
         bibItems.removeAll { $0.id == item.id }
+        bibGroupOverrides.removeAll()
         bibOutputURL = nil
         lastBibOutputSummary = nil
         refreshBibStatus()
@@ -514,6 +536,26 @@ final class AppModel: ObservableObject {
 
     func clearBibItems() {
         bibItems.removeAll()
+        bibGroupOverrides.removeAll()
+        bibOutputURL = nil
+        lastBibOutputSummary = nil
+        refreshBibStatus()
+    }
+
+    func setBibGroupOverride(groupID: String, resolution: BibGroupResolution) {
+        switch resolution {
+        case .automatic:
+            bibGroupOverrides.removeValue(forKey: groupID)
+        default:
+            bibGroupOverrides[groupID] = BibGroupOverride(resolution: resolution)
+        }
+        bibOutputURL = nil
+        lastBibOutputSummary = nil
+        refreshBibStatus()
+    }
+
+    func resetBibOverrides() {
+        bibGroupOverrides.removeAll()
         bibOutputURL = nil
         lastBibOutputSummary = nil
         refreshBibStatus()
@@ -526,9 +568,8 @@ final class AppModel: ObservableObject {
         }
         guard let outputURL = chooseSaveBib(defaultName: defaultBibOutputName(), defaultDirectory: defaultOutputDirectory) else { return }
         let items = bibItems
-        let task = bibTask
+        let options = currentBibProcessingOptions()
         bibStatus = "正在处理 \(items.count) 个 BibTeX 文件..."
-        let options = task.processingOptions
         runPDFJob {
             try writeProcessedBibFiles(items.map(\.url), to: outputURL, options: options)
         } completion: { result in
@@ -538,7 +579,7 @@ final class AppModel: ObservableObject {
                 self.bibPreviewSummary = summary
                 self.lastBibOutputSummary = summary
                 self.bibStatus = "已导出：\(outputURL.path) · 生成 \(summary.outputReferenceCount) 篇参考文献，清理 \(summary.duplicateReferenceCount) 条重复项。"
-                self.addRecentTask(tool: "BibTeX 工具", title: outputURL.lastPathComponent, detail: "\(task.recentTaskDetailPrefix) · \(items.count) 个文件 · \(summary.outputReferenceCount) 篇参考文献 · 清理 \(summary.duplicateReferenceCount) 条", outputURL: outputURL)
+                self.addRecentTask(tool: "BibTeX 工具", title: outputURL.lastPathComponent, detail: "清理并预览 · \(items.count) 个文件 · \(summary.outputReferenceCount) 篇参考文献 · 清理 \(summary.duplicateReferenceCount) 条", outputURL: outputURL)
                 self.revealIfNeeded(outputURL)
             case .failure(let error):
                 self.bibStatus = "BibTeX 处理失败：\(error.localizedDescription)"
@@ -894,48 +935,78 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshBibStatus() {
+        let token = UUID()
+        bibPreviewToken = token
         if bibItems.isEmpty {
             bibPreviewSummary = .empty
+            bibPreviewResult = .empty
             bibStatus = "添加至少一个 BibTeX 文件。"
             return
         }
 
+        let urls = bibItems.map(\.url)
+        let options = currentBibProcessingOptions()
         let totalSize = bibItems.reduce(0) { $0 + $1.fileSize }
-        do {
-            let summary = try summarizeBibFiles(bibItems.map(\.url), options: bibTask.processingOptions)
-            bibPreviewSummary = summary
-            if let lastBibOutputSummary {
-                bibStatus = "\(bibItems.count) 个文件，输入 \(summary.inputReferenceCount) 篇参考文献，最终生成 \(lastBibOutputSummary.outputReferenceCount) 篇。"
-            } else {
-                bibStatus = "\(bibItems.count) 个文件，输入 \(summary.inputReferenceCount) 篇参考文献，预计生成 \(summary.outputReferenceCount) 篇，合计 \(formatFileSize(totalSize))。"
+        let fallbackInputReferenceCount = bibItems.reduce(0) { $0 + $1.referenceCount }
+        let itemCount = bibItems.count
+        let lastSummary = lastBibOutputSummary
+        bibStatus = "\(itemCount) 个文件，正在更新预览..."
+
+        pdfQueue.async {
+            do {
+                let preview = try previewBibFiles(urls, options: options)
+                DispatchQueue.main.async {
+                    guard self.bibPreviewToken == token else { return }
+                    let summary = preview.summary
+                    self.bibPreviewResult = preview
+                    self.bibPreviewSummary = summary
+                    if let lastSummary {
+                        self.bibStatus = "\(itemCount) 个文件，输入 \(summary.inputReferenceCount) 篇参考文献，最终生成 \(lastSummary.outputReferenceCount) 篇。"
+                    } else {
+                        self.bibStatus = "\(itemCount) 个文件，输入 \(summary.inputReferenceCount) 篇参考文献，预计生成 \(summary.outputReferenceCount) 篇，合计 \(formatFileSize(totalSize))。"
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.bibPreviewToken == token else { return }
+                    self.bibPreviewResult = .empty
+                    self.bibPreviewSummary = BibProcessingSummary(
+                        inputReferenceCount: fallbackInputReferenceCount,
+                        outputReferenceCount: fallbackInputReferenceCount,
+                        duplicateReferenceCount: 0,
+                        duplicateKeyMatchCount: 0,
+                        duplicateTitleMatchCount: 0,
+                        duplicateDOIMatchCount: 0,
+                        keyConflictCount: 0,
+                        suspiciousDuplicateCount: 0,
+                        parseWarningCount: 0,
+                        nonReferenceCount: 0,
+                        manualOverrideCount: 0
+                    )
+                    self.bibStatus = "\(itemCount) 个文件，输入 \(fallbackInputReferenceCount) 篇参考文献，合计 \(formatFileSize(totalSize))。"
+                }
             }
-        } catch {
-            let inputReferenceCount = bibItems.reduce(0) { $0 + $1.referenceCount }
-            bibPreviewSummary = BibProcessingSummary(
-                inputReferenceCount: inputReferenceCount,
-                outputReferenceCount: inputReferenceCount,
-                duplicateReferenceCount: 0,
-                duplicateKeyMatchCount: 0,
-                duplicateTitleMatchCount: 0
-            )
-            bibStatus = "\(bibItems.count) 个文件，输入 \(inputReferenceCount) 篇参考文献，合计 \(formatFileSize(totalSize))。"
         }
     }
 
     private func defaultBibOutputName() -> String {
-        if bibItems.count == 1, bibTask.outputStyle == .formatted {
+        if bibItems.count == 1, bibFormatOutput, !bibRemoveDuplicates {
             return "\(safeName(bibItems[0].url.deletingPathExtension().lastPathComponent))_formatted.bib"
         }
-        switch bibTask {
-        case .merge:
+        switch (bibRemoveDuplicates, bibFormatOutput) {
+        case (false, false):
             return "merged.bib"
-        case .deduplicate:
-            return "deduplicated.bib"
-        case .format:
+        case (false, true):
             return "formatted.bib"
-        case .deduplicateAndFormat:
+        case (true, false):
+            return "deduplicated.bib"
+        case (true, true):
             return "deduplicated-formatted.bib"
         }
+    }
+
+    private func currentBibProcessingOptions() -> BibProcessingOptions {
+        BibProcessingOptions(removeDuplicates: bibRemoveDuplicates, formatOutput: bibFormatOutput, overrides: bibGroupOverrides)
     }
 
     private func addRecentTask(tool: String, title: String, detail: String, outputURL: URL?) {
